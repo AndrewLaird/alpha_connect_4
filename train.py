@@ -15,6 +15,8 @@ import signal
 from tqdm import tqdm
 import sys
 from collections import namedtuple
+from multiprocessing import Pool
+from multiprocessing import cpu_count
 
 class fixed_size_list():
     def __init__(self,size):
@@ -50,6 +52,22 @@ class fixed_size_list():
 
 def get_model_action(model,board,turn):
 	return model.get_action_probs(board,turn,num_rollouts=25)
+
+def pit_parallel(old_model,new_model,number_of_games):
+    _,old_first_winners = run_game_parllel(old_model,new_model,num_games//2,temp=0.0,num_rollouts=20)
+    _,new_first_winners = run_game_parllel(new_model,old_model,num_games//2,temp=0.0,num_rollouts=20)
+
+    total_winners = {0:0,1:0,2:0}
+    for winners in [old_first_winners,new_first_winners]:
+        total_wininers[0] += winners[0]
+        total_wininers[1] += winners[1]
+        total_wininers[2] += winners[2]
+    return win
+
+
+
+
+
 
 
 def pit(old_model,new_model,number_of_games=25):
@@ -170,6 +188,57 @@ def update_experience_value(winner,experience):
             winner_value = -winner_value
 
 
+def run_game_parllel(mcts_model1,mcts_model2,num_games,temp=1.0,num_rollouts=20):
+    print("cpu_counts",cpu_count())
+    pbar = tqdm(total=num_games)
+    def update(*a):
+        pbar.update()
+    with Pool(cpu_count()) as p:
+
+        wins = {0:0,1:0,2:0}
+        loop_experience = []
+
+        inputs = [[mcts_model1,mcts_model2,temp,num_rollouts] for x in range(num_games)]
+        responses = []
+        for i in range(num_games):
+            res =p.apply_async(run_game_wrapper,inputs[i],callback=update)
+            responses.append(res)
+
+        # wait on all of them
+        [res.wait() for res in responses]
+        
+        results = [x.get() for x in responses]
+
+        #results = p.starmap(run_game_wrapper,inputs)
+        for win,experience in results:
+            loop_experience.extend(experience)
+            wins[win] += 1
+
+        return loop_experience,wins
+
+def run_game_wrapper(mcts_model1,mcts_model2,temp,num_rollouts):
+    winner, experience= run_game(mcts_model1,mcts_model2,temp=temp,num_rollouts=num_rollouts)
+    update_experience_value(winner,experience)
+    return winner,experience
+
+
+def get_experience(mcts_model,temp=1.0,num_rollouts=20):
+    wins = {0:0,1:0,2:0}
+    loop_experience = []
+    for game in tqdm(range(num_games),leave=False):
+        winner, experience= run_game(mcts_model,mcts_model,temp=temp,num_rollouts=num_rollouts)
+        
+        # update the experience 
+        # based on the real winner of the game
+        update_experience_value(winner,experience)
+        # check to make sure this is updated
+        loop_experience.extend(experience)
+        wins[winner] += 1
+
+        # what would happen if you cleared the tree here?
+        #mcts_model.clear_tree()
+    return loop_experience,wins
+    
 Configuration = namedtuple("Configuration","columns rows inarow")
 
 
@@ -190,29 +259,19 @@ if __name__ == "__main__":
 
     # num games per training loop
     num_training_loops = 500
-    base_num_games = 50
+    base_num_games = 15
     num_games = base_num_games
-    wins = {0:0,1:0,2:0}
 
-    temp = .02
+    temp = 1
 
 
     total_experience = []#fixed_size_list(100000)
     for train_loop in range(num_training_loops):
-        for game in tqdm(range(num_games),leave=False):
-            winner, experience= run_game(mcts_model,mcts_model,temp=temp,num_rollouts=20)
-            
-            # update the experience 
-            # based on the real winner of the game
-            update_experience_value(winner,experience)
-            # check to make sure this is updated
-            total_experience.extend(experience)
-            wins[winner] += 1
+        loop_experience,wins = run_game_parllel(mcts_model,mcts_model,num_games,temp=temp,num_rollouts=20)
+        total_experience.extend(loop_experience)
 
-            # what would happen if you cleared the tree here?
-            #mcts_model.clear_tree()
-            # temp controls how close we are to using argmax
-            temp *= .99
+        # temp controls how close we are to using argmax
+        temp *= .9
         #after we have played our games, update the model
         old_model = mcts_model.copy()
         old_model.eval()
@@ -223,8 +282,6 @@ if __name__ == "__main__":
         print("\rTies: %.2f Player 1: %.2f Player 2: %.2f                  "%(win_averages[0],win_averages[1],win_averages[2]))
 
 
-        # with this set of weights
-        wins = {0:0,1:0,2:0}
         # clear out the tree that we have built up 
         mcts_model.clear_tree()
 
